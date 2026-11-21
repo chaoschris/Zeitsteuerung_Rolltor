@@ -1,20 +1,22 @@
+//ESP12F_Relay-X4
+
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <EEPROM.h>
 #include <time.h>
 
 // ==========================================
-// 1. KONFIGURATION (Bitte anpassen!)
+// 1. CONFIGURATION
 // ==========================================
-const char* ssid         = "DEIN_WLAN_NAME";
-const char* password     = "DEIN_WLAN_PASSWORT";
+const char* ssid         = "WLAN_SSID";
+const char* password     = "WLAN_PASSWORT";
 const char* www_username = "admin";
-const char* www_password = "geheimPassword123";
+const char* www_password = "Password123";
 const char* ntpServer    = "de.pool.ntp.org";
 const char* timeZone     = "CET-1CEST,M3.5.0,M10.5.0/3";
 
 // ==========================================
-// 2. PIN-BELEGUNG & ZUSTAND
+// 2. PIN-SETTINGS & STATUS
 // ==========================================
 int getRelayPin(int i) { return (i==0)?16:(i==1)?14:(i==2)?12:13; }
 int getInputPin(int i) { return (i==0)?0:(i==1)?2:(i==2)?4:(i==3)?5:15; }
