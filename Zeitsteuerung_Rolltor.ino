@@ -8,7 +8,7 @@
 // ==========================================
 // 1. CONFIGURATION (Standardwerte beim ersten Start)
 // ==========================================
-const char* def_ssid         = "WLAN_SSID;
+const char* def_ssid         = "WLAN_SSID";
 const char* def_password     = "wlan_password";
 const char* www_username     = "admin";
 const char* www_password     = "Password123";
