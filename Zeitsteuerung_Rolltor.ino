@@ -8,8 +8,8 @@
 // ==========================================
 // 1. CONFIGURATION (Standardwerte beim ersten Start)
 // ==========================================
-const char* def_ssid         = "WURSTBROT";
-const char* def_password     = "password";
+const char* def_ssid         = "WLAN_SSID";
+const char* def_password     = "wlan_password";
 const char* www_username     = "admin";
 const char* www_password     = "Password123";
 const char* ntpServer        = "de.pool.ntp.org";
@@ -54,12 +54,12 @@ unsigned long pulseOffAtMs = 0;
 bool isPulseCurrentlyOn = false;
 
 String getFormattedTime() {
+  if (time(nullptr) < 100000) return "Zeit wird synchronisiert...";
   struct tm ti;
-  if (!getLocalTime(&ti)) return "Zeit wird synchronisiert...";
-  char* b = (char*)malloc(40);
-  if (!b) return "Fehler";
-  strftime(b, 40, "%d.%m.%Y - %H:%M:%S Uhr", &ti);
-  String res = String(b); free(b); return res;
+  if (!getLocalTime(&ti, 10)) return "Zeit wird synchronisiert...";
+  char b[40];
+  strftime(b, sizeof(b), "%d.%m.%Y - %H:%M:%S Uhr", &ti);
+  return String(b);
 }
 
 void logSerial(String msg) {
@@ -108,8 +108,9 @@ void setRelayState(int i, bool s) {
 }
 
 bool isWithinTimeWindow() {
+  if (time(nullptr) < 100000) return false;
   struct tm ti;
-  if (!getLocalTime(&ti)) return false;
+  if (!getLocalTime(&ti, 10)) return false;
   uint16_t nowMin = ti.tm_hour * 60 + ti.tm_min;
   if (cfg.winStartMin == cfg.winEndMin) return true;
   if (cfg.winStartMin < cfg.winEndMin) return (nowMin >= cfg.winStartMin && nowMin < cfg.winEndMin);
@@ -202,16 +203,34 @@ void connectWiFi() {
   }
 }
 
-String readSerialLine() {
+String readSerialLine(bool maskPassword = false) {
+  delay(50);
   while (Serial.available()) Serial.read();
+  
   String input = "";
   while (true) {
     if (Serial.available() > 0) {
       char c = Serial.read();
+      
       if (c == '\n' || c == '\r') {
-        if (input.length() > 0) return input;
-      } else {
+        if (input.length() > 0) {
+          Serial.println();
+          return input;
+        }
+      } 
+      else if (c == 8 || c == 127) {
+        if (input.length() > 0) {
+          input.remove(input.length() - 1);
+          Serial.print("\b \b");
+        }
+      } 
+      else if (c >= 32 && c <= 126) {
         input += c;
+        if (maskPassword) {
+          Serial.print('*');
+        } else {
+          Serial.print(c);
+        }
       }
     }
     delay(10);
@@ -222,13 +241,12 @@ void runSerialWifiSetup() {
   Serial.println("\n==========================================");
   Serial.println("   WLAN-Konfiguration (Serielle Konsole)");
   Serial.println("==========================================");
-  Serial.println("Bitte neue WLAN-SSID eingeben und mit ENTER bestaetigen:");
-  String newSsid = readSerialLine();
+  Serial.print("Neue WLAN-SSID: ");
+  String newSsid = readSerialLine(false);
   newSsid.trim();
   
-  Serial.println("Eingegebene SSID: " + newSsid);
-  Serial.println("Bitte WLAN-Passwort eingeben und mit ENTER bestaetigen:");
-  String newPass = readSerialLine();
+  Serial.print("WLAN-Passwort:  ");
+  String newPass = readSerialLine(true);
   newPass.trim();
   
   strncpy(cfg.ssid, newSsid.c_str(), sizeof(cfg.ssid) - 1);
@@ -251,16 +269,32 @@ void checkSerialCommands() {
     if (cmd == "wifi" || cmd == "wlan") {
       runSerialWifiSetup();
     } else if (cmd == "status") {
-      Serial.println("\n--- SYSTEM-STATUS ---");
+      Serial.println("\n================ SYSTEM-STATUS ================");
       Serial.println("SSID:   " + String(cfg.ssid));
       Serial.println("WLAN:   " + String(WiFi.status() == WL_CONNECTED ? "Verbunden (" + WiFi.localIP().toString() + ")" : "Getrennt"));
       Serial.println("Zeit:   " + getFormattedTime());
-      Serial.println("Sperre: " + String(isSystemBlocked() ? "AKTIV" : "Frei"));
-      Serial.println("---------------------\n");
+      Serial.println("Sperre: " + String(isSystemBlocked() ? "AKTIV (" + String(getRemainingBlockSec()) + "s verbleibend)" : "Frei"));
+      
+      Serial.println("\n--- Relais-Ausgaenge ---");
+      for (int i = 0; i < 4; i++) {
+        String role = (cfg.pulseRelayIdx == i) ? " [Impuls-Timer]" : "";
+        Serial.println("Relais " + String(i + 1) + " (GPIO" + String(getRelayPin(i)) + "): " + 
+                       String(getRelayState(i) ? "EIN" : "AUS") + role);
+      }
+
+      Serial.println("\n--- Digitale Eingaenge ---");
+      for (int i = 0; i < 5; i++) {
+        int pin = getInputPin(i);
+        bool hi = (digitalRead(pin) == HIGH);
+        String role = (cfg.pirInputIdx == i) ? " [PIR-Sperre]" : "";
+        Serial.println("Eingang " + String(i + 1) + " (GPIO" + String(pin) + "): " + 
+                       String(hi ? "HIGH (1)" : "LOW (0)") + role);
+      }
+      Serial.println("===============================================\n");
     } else if (cmd == "help" || cmd == "?") {
       Serial.println("\nVerfuegbare Befehle:");
       Serial.println("  wifi   - WLAN SSID und Passwort neu einrichten");
-      Serial.println("  status - Aktuellen System- und Netzwerkstatus anzeigen");
+      Serial.println("  status - Aktuellen System-, Netzwerk- und Pin-Status anzeigen");
       Serial.println("  reboot - ESP8266 neu starten\n");
     } else if (cmd == "reboot") {
       Serial.println("[SYSTEM] Neustart wird eingeleitet...");
@@ -306,12 +340,20 @@ String getTimerStatusText() {
 void handleStatus() {
   if (!checkAuth()) return;
   bool blk = isSystemBlocked();
-  String j = "{\"time\":\"" + getFormattedTime() + "\",\"blocked\":" + String(blk?"true":"false");
-  j += ",\"pinAct\":" + String(isPirPinActive()?"true":"false") + ",\"rem\":" + String(getRemainingBlockSec());
-  j += ",\"tmr\":\"" + getTimerStatusText() + "\"";
-  for (int i = 0; i < 4; i++) j += ",\"r" + String(i) + "\":" + String(getRelayState(i)?"true":"false");
-  for (int i = 0; i < 5; i++) j += ",\"i" + String(i) + "\":" + String(digitalRead(getInputPin(i))==HIGH?"1":"0");
-  server.send(200, "application/json", j + "}");
+  String j = "{";
+  j += "\"time\":\"" + getFormattedTime() + "\",";
+  j += "\"blocked\":" + String(blk ? "true" : "false") + ",";
+  j += "\"pinAct\":" + String(isPirPinActive() ? "true" : "false") + ",";
+  j += "\"rem\":" + String(getRemainingBlockSec()) + ",";
+  j += "\"tmr\":\"" + getTimerStatusText() + "\"";
+  for (int i = 0; i < 4; i++) {
+    j += ",\"r" + String(i) + "\":" + String(getRelayState(i) ? "true" : "false");
+  }
+  for (int i = 0; i < 5; i++) {
+    j += ",\"i" + String(i) + "\":" + String(digitalRead(getInputPin(i)) == HIGH ? "1" : "0");
+  }
+  j += "}";
+  server.send(200, "application/json", j);
 }
 
 void handleRoot() {
