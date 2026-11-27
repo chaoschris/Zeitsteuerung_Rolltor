@@ -28,10 +28,14 @@ bool getRelayState(int i) {
   return (i==0)?rState0:(i==1)?rState1:(i==2)?rState2:rState3;
 }
 
+#define SSID_LEN 33
+#define PASS_LEN 65
+#define TIME_BUF_LEN 40
+
 struct AppConfig {
   uint32_t magic;
-  char ssid[33];
-  char password[65];
+  char ssid[SSID_LEN];
+  char password[PASS_LEN];
   bool useStatic;
   uint32_t ipRaw, subRaw, gwRaw, dnsRaw;
   int pirInputIdx;
@@ -45,7 +49,7 @@ struct AppConfig {
 };
 
 AppConfig cfg;
-const uint32_t EEPROM_MAGIC = 0xCAFEBAC2;
+const uint32_t EEPROM_MAGIC = 0xCAFEBAC4;
 ESP8266WebServer server(80);
 
 unsigned long pirHoldUntil = 0;
@@ -57,7 +61,7 @@ String getFormattedTime() {
   if (time(nullptr) < 100000) return "Zeit wird synchronisiert...";
   struct tm ti;
   if (!getLocalTime(&ti, 10)) return "Zeit wird synchronisiert...";
-  char b[40];
+  char b[TIME_BUF_LEN];
   strftime(b, sizeof(b), "%d.%m.%Y - %H:%M:%S Uhr", &ti);
   return String(b);
 }
@@ -162,49 +166,48 @@ void loadConfig() {
 void checkSerialCommands();
 
 void connectWiFi() {
-  Serial.print("[WLAN] Verbinde mit SSID: ");
-  Serial.println(cfg.ssid);
+  Serial.print("[WLAN] Verbinde mit SSID: '");
+  Serial.print(cfg.ssid);
+  Serial.println("'");
+  
+  WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
+  WiFi.setPhyMode(WIFI_PHY_MODE_11N);
+  WiFi.setOutputPower(17.5);
+  WiFi.setAutoReconnect(true);
+  
   if (cfg.useStatic) {
     Serial.println("[WLAN] Nutze statische IP-Konfiguration...");
     WiFi.config(IPAddress(cfg.ipRaw), IPAddress(cfg.gwRaw), IPAddress(cfg.subRaw), IPAddress(cfg.dnsRaw));
   } else {
     Serial.println("[WLAN] Nutze DHCP...");
-    WiFi.config(0U, 0U, 0U);
   }
   
   WiFi.begin(cfg.ssid, cfg.password);
   unsigned long t = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t < 15000) {
-    delay(500);
+  while (WiFi.status() != WL_CONNECTED && millis() - t < 20000) {
+    delay(250);
     Serial.print(".");
     checkSerialCommands();
   }
   Serial.println();
   
-  if (WiFi.status() != WL_CONNECTED && cfg.useStatic) {
-    Serial.println("[WLAN] Statische Verbindung fehlgeschlagen! Fallback auf DHCP...");
-    WiFi.disconnect(); WiFi.config(0U, 0U, 0U); WiFi.begin(cfg.ssid, cfg.password);
-    t = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t < 15000) {
-      delay(500);
-      Serial.print(".");
-      checkSerialCommands();
-    }
-    Serial.println();
-  }
-  
   if (WiFi.status() == WL_CONNECTED) {
     Serial.print("[WLAN] Verbunden! IP-Adresse: ");
     Serial.println(WiFi.localIP());
   } else {
-    Serial.println("[WLAN] FEHLER: Verbindung konnte nicht hergestellt werden!");
-    Serial.println("[INFO] Tippe 'wifi' in die serielle Konsole, um SSID und Passwort zu aendern.");
+    Serial.print("[WLAN] FEHLER: Verbindung fehlgeschlagen! Status-Code: ");
+    Serial.println(WiFi.status());
+    Serial.println("[INFO] Moegliche Ursachen bei Code 4:");
+    Serial.println("       - Router nutzt WPA3 / PMF (bitte auf reines WPA2 CCMP stellen)");
+    Serial.println("       - MAC-Adressfilter im Router aktiv");
+    Serial.println("       - 3.3V-Spannungseinbruch beim Senden");
+    Serial.println("[INFO] Tippe 'wifi' in die serielle Konsole, um SSID/Passwort zu pruefen.");
   }
 }
 
 String readSerialLine(bool maskPassword = false) {
-  delay(50);
+  delay(100);
   while (Serial.available()) Serial.read();
   
   String input = "";
@@ -214,6 +217,8 @@ String readSerialLine(bool maskPassword = false) {
       
       if (c == '\n' || c == '\r') {
         if (input.length() > 0) {
+          delay(20);
+          while (Serial.available()) Serial.read();
           Serial.println();
           return input;
         }
@@ -271,7 +276,21 @@ void checkSerialCommands() {
     } else if (cmd == "status") {
       Serial.println("\n================ SYSTEM-STATUS ================");
       Serial.println("SSID:   " + String(cfg.ssid));
-      Serial.println("WLAN:   " + String(WiFi.status() == WL_CONNECTED ? "Verbunden (" + WiFi.localIP().toString() + ")" : "Getrennt"));
+      
+      if (WiFi.status() == WL_CONNECTED) {
+        long rssi = WiFi.RSSI();
+        int quality = constrain(2 * (rssi + 100), 0, 100);
+        String rating = (rssi >= -55) ? "Sehr gut" :
+                        (rssi >= -67) ? "Gut" :
+                        (rssi >= -80) ? "Mittel" : "Schwach";
+        
+        Serial.println("WLAN:   Verbunden (" + WiFi.localIP().toString() + ")");
+        Serial.println("Signal: " + String(quality) + "% (" + String(rssi) + " dBm - " + rating + ")");
+      } else {
+        Serial.println("WLAN:   Getrennt");
+        Serial.println("Signal: Kein Signal");
+      }
+
       Serial.println("Zeit:   " + getFormattedTime());
       Serial.println("Sperre: " + String(isSystemBlocked() ? "AKTIV (" + String(getRemainingBlockSec()) + "s verbleibend)" : "Frei"));
       
