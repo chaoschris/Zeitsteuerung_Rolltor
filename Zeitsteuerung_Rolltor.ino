@@ -9,7 +9,7 @@
 // 1. CONFIGURATION
 // ==========================================
 const char* ssid         = "WLAN_SSID";
-const char* password     = "WLAN_PASSWORT";
+const char* password     = "WLAN_PASSWORD";
 const char* www_username = "admin";
 const char* www_password = "Password123";
 const char* ntpServer    = "de.pool.ntp.org";
@@ -22,6 +22,7 @@ int getRelayPin(int i) { return (i==0)?16:(i==1)?14:(i==2)?12:13; }
 int getInputPin(int i) { return (i==0)?0:(i==1)?2:(i==2)?4:(i==3)?5:15; }
 
 bool rState0 = false, rState1 = false, rState2 = false, rState3 = false;
+bool lastBlockedState = false; // Hilfsvariable für serielle Statuswechsel
 
 bool getRelayState(int i) {
   return (i==0)?rState0:(i==1)?rState1:(i==2)?rState2:rState3;
@@ -50,6 +51,19 @@ unsigned long lastPulseTriggerMs = 0;
 unsigned long pulseOffAtMs = 0;
 bool isPulseCurrentlyOn = false;
 
+String getFormattedTime() {
+  struct tm ti;
+  if (!getLocalTime(&ti)) return "Zeit wird synchronisiert...";
+  char* b = (char*)malloc(40);
+  if (!b) return "Fehler";
+  strftime(b, 40, "%d.%m.%Y - %H:%M:%S Uhr", &ti);
+  String res = String(b); free(b); return res;
+}
+
+void logSerial(String msg) {
+  Serial.println("[" + getFormattedTime() + "] " + msg);
+}
+
 bool isPirPinActive() {
   if (cfg.pirInputIdx < 0 || cfg.pirInputIdx > 4) return false;
   int val = digitalRead(getInputPin(cfg.pirInputIdx));
@@ -73,12 +87,22 @@ uint32_t getRemainingBlockSec() {
 }
 
 void setRelayState(int i, bool s) {
-  if (isSystemBlocked()) s = false;
+  if (isSystemBlocked() && s) {
+    logSerial("BLOCKIERT: Einschalten von Relais " + String(i + 1) + " durch Bewegungsmelder verhindert.");
+    s = false;
+  }
+  
+  bool prevState = getRelayState(i);
   if (i == 0) rState0 = s;
   else if (i == 1) rState1 = s;
   else if (i == 2) rState2 = s;
   else if (i == 3) rState3 = s;
+  
   digitalWrite(getRelayPin(i), s ? HIGH : LOW);
+  
+  if (prevState != s) {
+    logSerial("RELAIS: Relais " + String(i + 1) + " (GPIO" + String(getRelayPin(i)) + ") -> " + (s ? "EIN" : "AUS"));
+  }
 }
 
 bool isWithinTimeWindow() {
@@ -105,12 +129,14 @@ void saveConfig() {
   cfg.magic = EEPROM_MAGIC;
   EEPROM.put(0, cfg);
   EEPROM.commit();
+  logSerial("EEPROM: Konfiguration erfolgreich gespeichert.");
 }
 
 void loadConfig() {
   EEPROM.begin(sizeof(AppConfig));
   EEPROM.get(0, cfg);
   if (cfg.magic != EEPROM_MAGIC) {
+    Serial.println("[EEPROM] Keine gueltige Konfiguration gefunden. Lade Standardwerte...");
     cfg.useStatic = false;
     cfg.ipRaw  = (uint32_t)IPAddress(192, 168, 1, 200);
     cfg.subRaw = (uint32_t)IPAddress(255, 255, 255, 0);
@@ -120,29 +146,45 @@ void loadConfig() {
     cfg.pulseRelayIdx = -1; cfg.pulseIntMin = 5; cfg.pulseDurMs = 500;
     cfg.winStartMin = 8 * 60; cfg.winEndMin = 20 * 60;
     saveConfig();
+  } else {
+    Serial.println("[EEPROM] Konfiguration erfolgreich geladen.");
   }
 }
 
 void connectWiFi() {
+  Serial.print("[WLAN] Verbinde mit SSID: ");
+  Serial.println(ssid);
   WiFi.mode(WIFI_STA);
-  if (cfg.useStatic) WiFi.config(IPAddress(cfg.ipRaw), IPAddress(cfg.gwRaw), IPAddress(cfg.subRaw), IPAddress(cfg.dnsRaw));
-  else WiFi.config(0U, 0U, 0U);
+  if (cfg.useStatic) {
+    Serial.println("[WLAN] Nutze statische IP-Konfiguration...");
+    WiFi.config(IPAddress(cfg.ipRaw), IPAddress(cfg.gwRaw), IPAddress(cfg.subRaw), IPAddress(cfg.dnsRaw));
+  } else {
+    Serial.println("[WLAN] Nutze DHCP...");
+    WiFi.config(0U, 0U, 0U);
+  }
+  
   WiFi.begin(ssid, password);
   unsigned long t = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t < 15000) delay(500);
-  if (WiFi.status() != WL_CONNECTED && cfg.useStatic) {
-    WiFi.disconnect(); WiFi.config(0U, 0U, 0U); WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED) delay(500);
+  while (WiFi.status() != WL_CONNECTED && millis() - t < 15000) {
+    delay(500);
+    Serial.print(".");
   }
-}
-
-String getFormattedTime() {
-  struct tm ti;
-  if (!getLocalTime(&ti)) return "Zeit wird synchronisiert...";
-  char* b = (char*)malloc(40);
-  if (!b) return "Fehler";
-  strftime(b, 40, "%d.%m.%Y - %H:%M:%S Uhr", &ti);
-  String res = String(b); free(b); return res;
+  Serial.println();
+  
+  if (WiFi.status() != WL_CONNECTED && cfg.useStatic) {
+    Serial.println("[WLAN] Statische Verbindung fehlgeschlagen! Fallback auf DHCP...");
+    WiFi.disconnect(); WiFi.config(0U, 0U, 0U); WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(500);
+      Serial.print(".");
+    }
+    Serial.println();
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("[WLAN] Verbunden! IP-Adresse: ");
+    Serial.println(WiFi.localIP());
+  }
 }
 
 bool checkAuth() {
@@ -258,6 +300,11 @@ void handleSaveTimer() {
   if (server.hasArg("w_start")) cfg.winStartMin = hhmmToMin(server.arg("w_start"));
   if (server.hasArg("w_end"))   cfg.winEndMin   = hhmmToMin(server.arg("w_end"));
   lastPulseTriggerMs = millis(); isPulseCurrentlyOn = false;
+  
+  logSerial("WEB-CONFIG: Impuls-Timer aktualisiert -> Relais: " + String(cfg.pulseRelayIdx + 1) + 
+            ", Intervall: " + String(cfg.pulseIntMin) + "m, Dauer: " + String(cfg.pulseDurMs) + 
+            "ms, Fenster: " + minToHHMM(cfg.winStartMin) + "-" + minToHHMM(cfg.winEndMin));
+            
   saveConfig(); server.sendHeader("Location", "/"); server.send(303);
 }
 
@@ -281,7 +328,14 @@ void handleSavePir() {
   if (server.hasArg("idx")) cfg.pirInputIdx = server.arg("idx").toInt();
   if (server.hasArg("pol")) cfg.pirActiveHigh = (server.arg("pol").toInt() == 1);
   if (server.hasArg("delay")) { long d = server.arg("delay").toInt(); cfg.pirDelaySec = (d < 0) ? 0 : (uint32_t)d; }
-  pirHoldUntil = 0; saveConfig(); server.sendHeader("Location", "/"); server.send(303);
+  pirHoldUntil = 0; 
+  
+  logSerial("WEB-CONFIG: Bewegungsmelder aktualisiert -> Eingang: " + 
+            (cfg.pirInputIdx >= 0 ? "GPIO" + String(getInputPin(cfg.pirInputIdx)) : "Deaktiviert") + 
+            ", Logik: " + (cfg.pirActiveHigh ? "Active-HIGH" : "Active-LOW") + 
+            ", Nachlauf: " + String(cfg.pirDelaySec) + "s");
+            
+  saveConfig(); server.sendHeader("Location", "/"); server.send(303);
 }
 
 void handleNetwork() {
@@ -305,10 +359,18 @@ void handleSaveNetwork() {
     IPAddress ip, sub, gw, dns;
     if (ip.fromString(server.arg("ip")) && sub.fromString(server.arg("subnet")) && gw.fromString(server.arg("gateway")) && dns.fromString(server.arg("dns"))) {
       cfg.useStatic = true; cfg.ipRaw = (uint32_t)ip; cfg.subRaw = (uint32_t)sub; cfg.gwRaw = (uint32_t)gw; cfg.dnsRaw = (uint32_t)dns;
-    } else { server.send(400, "text/plain", "Ungueltiges IP-Format!"); return; }
-  } else cfg.useStatic = false;
+      logSerial("WEB-CONFIG: Statische IP gespeichert (" + ip.toString() + ")");
+    } else { 
+      logSerial("WEB-CONFIG FEHLER: Ungueltiges IP-Format eingegeben.");
+      server.send(400, "text/plain", "Ungueltiges IP-Format!"); return; 
+    }
+  } else {
+    cfg.useStatic = false;
+    logSerial("WEB-CONFIG: Netzwerk auf DHCP umgestellt.");
+  }
   saveConfig();
   server.send(200, "text/html", "<html><body style='background:#1e1e2f;color:#fff;font-family:Arial;text-align:center;padding:40px;'><h2>Gespeichert! Neustart...</h2></body></html>");
+  logSerial("SYSTEM: Neustart wird durchgefuehrt...");
   delay(1500); ESP.restart();
 }
 
@@ -316,37 +378,81 @@ void handleToggle() {
   if (!checkAuth()) return;
   if (!isSystemBlocked() && server.hasArg("relay")) {
     int idx = server.arg("relay").toInt();
-    if (idx >= 0 && idx < 4) setRelayState(idx, !getRelayState(idx));
+    if (idx >= 0 && idx < 4) {
+      logSerial("WEB-AKTION: Manueller Schaltbefehl fuer Relais " + String(idx + 1));
+      setRelayState(idx, !getRelayState(idx));
+    }
+  } else if (isSystemBlocked()) {
+    logSerial("WEB-AKTION ABGEWIESEN: Relais-Schaltversuch waehrend PIR-Sperre.");
   }
   server.send(200, "text/plain", "OK");
 }
 
 void setup() {
   Serial.begin(115200);
+  delay(200);
+  Serial.println("\n==========================================");
+  Serial.println("   ESP12F Relay-X4 Rolltor-Steuerung");
+  Serial.println("==========================================");
+  
+  Serial.println("[INIT] Initialisiere Relais-Ausgaenge (alle AUS)...");
   for (int i = 0; i < 4; i++) { pinMode(getRelayPin(i), OUTPUT); digitalWrite(getRelayPin(i), LOW); }
+  
+  Serial.println("[INIT] Initialisiere digitale Eingaenge...");
   for (int i = 0; i < 5; i++) { int p = getInputPin(i); pinMode(p, (p == 15) ? INPUT : INPUT_PULLUP); }
-  loadConfig(); connectWiFi(); configTime(timeZone, ntpServer);
+  
+  loadConfig(); 
+  connectWiFi(); 
+  
+  Serial.println("[NTP] Starte Zeitsynchronisation mit " + String(ntpServer) + "...");
+  configTime(timeZone, ntpServer);
+  
   lastPulseTriggerMs = millis();
   server.on("/", handleRoot); server.on("/status", handleStatus); server.on("/toggle", handleToggle);
   server.on("/timer", handleTimerConfig); server.on("/savetimer", HTTP_POST, handleSaveTimer);
   server.on("/pir", handlePirConfig); server.on("/savepir", HTTP_POST, handleSavePir);
   server.on("/network", handleNetwork); server.on("/savenetwork", HTTP_POST, handleSaveNetwork);
   server.begin();
+  Serial.println("[HTTP] Webserver gestartet auf Port 80.");
+  Serial.println("[SYSTEM] Setup abgeschlossen. Bereit.\n");
 }
 
 void loop() {
   bool blocked = isSystemBlocked();
-  if (blocked) {
-    for (int i = 0; i < 4; i++) if (getRelayState(i)) setRelayState(i, false);
-    isPulseCurrentlyOn = false;
+  
+  if (blocked != lastBlockedState) {
+    if (blocked) {
+      logSerial("ALARM: Bewegungsmelder hat ausgeloest! Relais werden blockiert (Nachlauf: " + String(cfg.pirDelaySec) + "s).");
+    } else {
+      logSerial("ENTWARNUNG: Bewegungsmelder-Sperre beendet. Relais wieder freigegeben.");
+    }
+    lastBlockedState = blocked;
   }
+
+  if (blocked) {
+    for (int i = 0; i < 4; i++) {
+      if (getRelayState(i)) setRelayState(i, false);
+    }
+    if (isPulseCurrentlyOn) {
+      logSerial("TIMER: Laufender Impuls durch Bewegungsmelder abgebrochen!");
+      isPulseCurrentlyOn = false;
+    }
+  }
+  
   if (cfg.pulseRelayIdx >= 0 && cfg.pulseRelayIdx <= 3) {
     if (isPulseCurrentlyOn) {
-      if ((long)(millis() - pulseOffAtMs) >= 0) { setRelayState(cfg.pulseRelayIdx, false); isPulseCurrentlyOn = false; }
+      if ((long)(millis() - pulseOffAtMs) >= 0) { 
+        logSerial("TIMER: Impuls-Dauer abgelaufen. Schalte Relais " + String(cfg.pulseRelayIdx + 1) + " aus.");
+        setRelayState(cfg.pulseRelayIdx, false); 
+        isPulseCurrentlyOn = false; 
+      }
     } else if (!blocked && isWithinTimeWindow()) {
       if (millis() - lastPulseTriggerMs >= (unsigned long)cfg.pulseIntMin * 60000UL) {
-        lastPulseTriggerMs = millis(); setRelayState(cfg.pulseRelayIdx, true);
-        pulseOffAtMs = millis() + cfg.pulseDurMs; isPulseCurrentlyOn = true;
+        lastPulseTriggerMs = millis(); 
+        logSerial("TIMER: Zyklischer Impuls ausgeloest fuer Relais " + String(cfg.pulseRelayIdx + 1) + " (" + String(cfg.pulseDurMs) + " ms).");
+        setRelayState(cfg.pulseRelayIdx, true);
+        pulseOffAtMs = millis() + cfg.pulseDurMs; 
+        isPulseCurrentlyOn = true;
       }
     }
   }
