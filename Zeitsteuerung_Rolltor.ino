@@ -9,7 +9,7 @@
 // 1. CONFIGURATION (Standardwerte beim ersten Start)
 // ==========================================
 const char* def_ssid         = "WURSTBROT";
-const char* def_password     = "z0ellner";
+const char* def_password     = "password";
 const char* www_username     = "admin";
 const char* www_password     = "Password123";
 const char* ntpServer        = "de.pool.ntp.org";
