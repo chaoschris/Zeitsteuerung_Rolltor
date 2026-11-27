@@ -6,14 +6,14 @@
 #include <time.h>
 
 // ==========================================
-// 1. CONFIGURATION
+// 1. CONFIGURATION (Standardwerte beim ersten Start)
 // ==========================================
-const char* ssid         = "WLAN_SSID";
-const char* password     = "WLAN_PASSWORD";
-const char* www_username = "admin";
-const char* www_password = "Password123";
-const char* ntpServer    = "de.pool.ntp.org";
-const char* timeZone     = "CET-1CEST,M3.5.0,M10.5.0/3";
+const char* def_ssid         = "WURSTBROT";
+const char* def_password     = "z0ellner";
+const char* www_username     = "admin";
+const char* www_password     = "Password123";
+const char* ntpServer        = "de.pool.ntp.org";
+const char* timeZone         = "CET-1CEST,M3.5.0,M10.5.0/3";
 
 // ==========================================
 // 2. PIN-SETTINGS & STATUS
@@ -22,7 +22,7 @@ int getRelayPin(int i) { return (i==0)?16:(i==1)?14:(i==2)?12:13; }
 int getInputPin(int i) { return (i==0)?0:(i==1)?2:(i==2)?4:(i==3)?5:15; }
 
 bool rState0 = false, rState1 = false, rState2 = false, rState3 = false;
-bool lastBlockedState = false; // Hilfsvariable für serielle Statuswechsel
+bool lastBlockedState = false;
 
 bool getRelayState(int i) {
   return (i==0)?rState0:(i==1)?rState1:(i==2)?rState2:rState3;
@@ -30,6 +30,8 @@ bool getRelayState(int i) {
 
 struct AppConfig {
   uint32_t magic;
+  char ssid[33];
+  char password[65];
   bool useStatic;
   uint32_t ipRaw, subRaw, gwRaw, dnsRaw;
   int pirInputIdx;
@@ -43,7 +45,7 @@ struct AppConfig {
 };
 
 AppConfig cfg;
-const uint32_t EEPROM_MAGIC = 0xCAFEBAC1;
+const uint32_t EEPROM_MAGIC = 0xCAFEBAC2;
 ESP8266WebServer server(80);
 
 unsigned long pirHoldUntil = 0;
@@ -137,6 +139,11 @@ void loadConfig() {
   EEPROM.get(0, cfg);
   if (cfg.magic != EEPROM_MAGIC) {
     Serial.println("[EEPROM] Keine gueltige Konfiguration gefunden. Lade Standardwerte...");
+    strncpy(cfg.ssid, def_ssid, sizeof(cfg.ssid) - 1);
+    cfg.ssid[sizeof(cfg.ssid) - 1] = '\0';
+    strncpy(cfg.password, def_password, sizeof(cfg.password) - 1);
+    cfg.password[sizeof(cfg.password) - 1] = '\0';
+    
     cfg.useStatic = false;
     cfg.ipRaw  = (uint32_t)IPAddress(192, 168, 1, 200);
     cfg.subRaw = (uint32_t)IPAddress(255, 255, 255, 0);
@@ -151,9 +158,11 @@ void loadConfig() {
   }
 }
 
+void checkSerialCommands();
+
 void connectWiFi() {
   Serial.print("[WLAN] Verbinde mit SSID: ");
-  Serial.println(ssid);
+  Serial.println(cfg.ssid);
   WiFi.mode(WIFI_STA);
   if (cfg.useStatic) {
     Serial.println("[WLAN] Nutze statische IP-Konfiguration...");
@@ -163,20 +172,23 @@ void connectWiFi() {
     WiFi.config(0U, 0U, 0U);
   }
   
-  WiFi.begin(ssid, password);
+  WiFi.begin(cfg.ssid, cfg.password);
   unsigned long t = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t < 15000) {
     delay(500);
     Serial.print(".");
+    checkSerialCommands();
   }
   Serial.println();
   
   if (WiFi.status() != WL_CONNECTED && cfg.useStatic) {
     Serial.println("[WLAN] Statische Verbindung fehlgeschlagen! Fallback auf DHCP...");
-    WiFi.disconnect(); WiFi.config(0U, 0U, 0U); WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED) {
+    WiFi.disconnect(); WiFi.config(0U, 0U, 0U); WiFi.begin(cfg.ssid, cfg.password);
+    t = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - t < 15000) {
       delay(500);
       Serial.print(".");
+      checkSerialCommands();
     }
     Serial.println();
   }
@@ -184,6 +196,77 @@ void connectWiFi() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.print("[WLAN] Verbunden! IP-Adresse: ");
     Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("[WLAN] FEHLER: Verbindung konnte nicht hergestellt werden!");
+    Serial.println("[INFO] Tippe 'wifi' in die serielle Konsole, um SSID und Passwort zu aendern.");
+  }
+}
+
+String readSerialLine() {
+  while (Serial.available()) Serial.read();
+  String input = "";
+  while (true) {
+    if (Serial.available() > 0) {
+      char c = Serial.read();
+      if (c == '\n' || c == '\r') {
+        if (input.length() > 0) return input;
+      } else {
+        input += c;
+      }
+    }
+    delay(10);
+  }
+}
+
+void runSerialWifiSetup() {
+  Serial.println("\n==========================================");
+  Serial.println("   WLAN-Konfiguration (Serielle Konsole)");
+  Serial.println("==========================================");
+  Serial.println("Bitte neue WLAN-SSID eingeben und mit ENTER bestaetigen:");
+  String newSsid = readSerialLine();
+  newSsid.trim();
+  
+  Serial.println("Eingegebene SSID: " + newSsid);
+  Serial.println("Bitte WLAN-Passwort eingeben und mit ENTER bestaetigen:");
+  String newPass = readSerialLine();
+  newPass.trim();
+  
+  strncpy(cfg.ssid, newSsid.c_str(), sizeof(cfg.ssid) - 1);
+  cfg.ssid[sizeof(cfg.ssid) - 1] = '\0';
+  strncpy(cfg.password, newPass.c_str(), sizeof(cfg.password) - 1);
+  cfg.password[sizeof(cfg.password) - 1] = '\0';
+  
+  saveConfig();
+  Serial.println("[SYSTEM] WLAN-Daten gespeichert! Neustart in 2 Sekunden...");
+  delay(2000);
+  ESP.restart();
+}
+
+void checkSerialCommands() {
+  if (Serial.available() > 0) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    cmd.toLowerCase();
+    
+    if (cmd == "wifi" || cmd == "wlan") {
+      runSerialWifiSetup();
+    } else if (cmd == "status") {
+      Serial.println("\n--- SYSTEM-STATUS ---");
+      Serial.println("SSID:   " + String(cfg.ssid));
+      Serial.println("WLAN:   " + String(WiFi.status() == WL_CONNECTED ? "Verbunden (" + WiFi.localIP().toString() + ")" : "Getrennt"));
+      Serial.println("Zeit:   " + getFormattedTime());
+      Serial.println("Sperre: " + String(isSystemBlocked() ? "AKTIV" : "Frei"));
+      Serial.println("---------------------\n");
+    } else if (cmd == "help" || cmd == "?") {
+      Serial.println("\nVerfuegbare Befehle:");
+      Serial.println("  wifi   - WLAN SSID und Passwort neu einrichten");
+      Serial.println("  status - Aktuellen System- und Netzwerkstatus anzeigen");
+      Serial.println("  reboot - ESP8266 neu starten\n");
+    } else if (cmd == "reboot") {
+      Serial.println("[SYSTEM] Neustart wird eingeleitet...");
+      delay(500);
+      ESP.restart();
+    }
   }
 }
 
@@ -394,6 +477,7 @@ void setup() {
   Serial.println("\n==========================================");
   Serial.println("   ESP12F Relay-X4 Rolltor-Steuerung");
   Serial.println("==========================================");
+  Serial.println("[INFO] Tippe 'help' oder 'wifi' fuer Konsolenbefehle.\n");
   
   Serial.println("[INIT] Initialisiere Relais-Ausgaenge (alle AUS)...");
   for (int i = 0; i < 4; i++) { pinMode(getRelayPin(i), OUTPUT); digitalWrite(getRelayPin(i), LOW); }
@@ -418,6 +502,8 @@ void setup() {
 }
 
 void loop() {
+  checkSerialCommands();
+  
   bool blocked = isSystemBlocked();
   
   if (blocked != lastBlockedState) {
