@@ -8,7 +8,7 @@
 // ==========================================
 // 1. CONFIGURATION (Standardwerte beim ersten Start)
 // ==========================================
-const char* def_ssid         = "WLAN_SSID";
+const char* def_ssid         = "WLAN_SSID;
 const char* def_password     = "wlan_password";
 const char* www_username     = "admin";
 const char* www_password     = "Password123";
@@ -212,7 +212,7 @@ String readSerialLine(bool maskPassword = false) {
   
   String input = "";
   while (true) {
-    if (Serial.available() > 0) {
+    while (Serial.available() > 0) {
       char c = Serial.read();
       
       if (c == '\n' || c == '\r') {
@@ -238,7 +238,7 @@ String readSerialLine(bool maskPassword = false) {
         }
       }
     }
-    delay(10);
+    yield(); // Wichtig: Kein delay(10), damit der Serial-Puffer nicht ueberlaeuft!
   }
 }
 
@@ -252,7 +252,10 @@ void runSerialWifiSetup() {
   
   Serial.print("WLAN-Passwort:  ");
   String newPass = readSerialLine(true);
-  newPass.trim();
+  // KEIN newPass.trim(), damit Leerzeichen am Anfang/Ende erhalten bleiben!
+  
+  Serial.println("[CHECK] SSID-Laenge: " + String(newSsid.length()) + " Zeichen");
+  Serial.println("[CHECK] Passwort-Laenge: " + String(newPass.length()) + " Zeichen");
   
   strncpy(cfg.ssid, newSsid.c_str(), sizeof(cfg.ssid) - 1);
   cfg.ssid[sizeof(cfg.ssid) - 1] = '\0';
@@ -264,6 +267,7 @@ void runSerialWifiSetup() {
   delay(2000);
   ESP.restart();
 }
+
 
 void checkSerialCommands() {
   if (Serial.available() > 0) {
